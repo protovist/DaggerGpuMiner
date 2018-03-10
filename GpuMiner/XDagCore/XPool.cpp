@@ -1,8 +1,9 @@
-#include "XPool.h"
 #include <stdlib.h>
+#include <thread>
 #include "dfstools/dfslib_string.h"
 #include "dar/crc.h"
 #include "XAddress.h"
+#include "XPool.h"
 #include "XTime.h"
 #include "Core/Log.h"
 #include "Utils/StringFormat.h"
@@ -11,25 +12,31 @@
 #define FIRST_SHARE_SEND_TIMEOUT 10
 #define BLOCK_TIME 64
 
-XPool::XPool(std::string& accountAddress, std::string& poolAddress, XTaskProcessor *taskProcessor)
+XPool::XPool(XTaskProcessor *taskProcessor, uint32_t sourceAddress, int sourcePort)
 {
-    strcpy(_poolAddress, poolAddress.c_str());
+  _sourceAddress = sourceAddress;
+  _sourcePort = sourcePort;
+  strcpy(_poolAddress, taskProcessor->getPoolUrl().c_str());
     _taskProcessor = taskProcessor;
     _ndata = 0;
     _maxndata = sizeof(struct cheatcoin_field);
     _localMiner.nfield_in = 0;
     _localMiner.nfield_out = 0;
     _taskTime = 0;
+    _elapsedTime = 0;
+    _startTime = time(0);
     _lastShareTime = 0;
+    _shareCount = 0;
     memset(_lastHash, 0, sizeof(cheatcoin_hash_t));
 
     XAddress address;
-    address.AddressToHash(accountAddress.c_str(), _addressHash);
+    address.AddressToHash(taskProcessor->getAccountAddress().c_str(), _addressHash);
     memcpy(_localMiner.id.data, _addressHash, sizeof(cheatcoin_hash_t));
 }
 
 XPool::~XPool()
 {
+  //    _submitThread->join();
     if(!_crypt)
     {
         free(_crypt);
@@ -51,6 +58,7 @@ bool XPool::Initialize()
 
     XBlock::GenerateFakeBlock(&_firstBlock);
     crc_init();
+    
     return true;
 }
 
@@ -83,15 +91,34 @@ bool XPool::Connect()
     _ndata = 0;
     _maxndata = sizeof(struct cheatcoin_field);
 
-    if(!_network.Connect(_poolAddress))
+    if(!_network.Connect(_poolAddress, _sourceAddress, _sourcePort))
     {
-        return false;
+      return false;
     }
     //as far as I understand it is necessary for miner identification
     if(!SendToPool(_firstBlock.field, CHEATCOIN_BLOCK_FIELDS))
     {
         return false;
     }
+#if 0
+    _submitThread.reset(new std::thread([&]() {
+	  cheatcoin_pool_task task;
+	  while (true) {
+	    std::this_thread::sleep_for(std::chrono::seconds(1));
+	    _submitQueueMutex.lock();
+	    if (_submitQueue.empty()) {
+	      //	      std::cout << "submit thread waiting for task" << std::endl;
+	      _submitQueueMutex.unlock();
+	      continue;
+	    }
+	    _submitQueueMutex.unlock();
+	    while (_submitQueue.pop(task)) {
+	      SubmitShareHash(&task);
+	      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	    }
+	  }
+	}));
+#endif
     return true;
 }
 
@@ -110,7 +137,7 @@ bool XPool::Interract()
     }
 
     bool success = CheckNewTasks();
-    success = success && SendTaskResult();
+    //    success = success && SendTaskResult();
     return success;
 }
 
@@ -170,13 +197,13 @@ void XPool::OnNewTask(cheatcoin_field* data)
     _lastShareTime = _taskTime = time(0);
 
     clog(XDag::LogChannel) << string_format("New task: t=%llx N=%llu", task->GetTask()->main_time << 16 | 0xffff, _taskProcessor->GetCount());
-#ifdef _TEST_TASKS
+#if _TEST_TASKS
     _taskProcessor->DumpTasks();
 #endif
     _ndata = 0;
     _maxndata = sizeof(struct cheatcoin_field);
 
-#ifdef _DEBUG
+#if _DEBUG
     std::cout << "State:" << std::endl;
     DumpHex((uint8_t*)task->GetTask()->ctx.state, 32);
     std::cout << "Data:" << std::endl;
@@ -208,10 +235,43 @@ bool XPool::SendTaskResult()
     cheatcoin_pool_task *task = _taskProcessor->GetCurrentTask()->GetTask();
     uint64_t *hash = task->minhash.data;
     _lastShareTime = time(0);
+    _elapsedTime = _lastShareTime - _startTime;
+    _shareCount++;
+    
     memcpy(_lastHash, hash, sizeof(cheatcoin_hash_t));
     bool res = SendToPool(&task->lastfield, 1);
-    clog(XDag::LogChannel) << string_format("Share t=%llx res=%s\n%016llx%016llx%016llx%016llx",
-        task->main_time << 16 | 0xffff, res ? "OK" : "Fail", hash[3], hash[2], hash[1], hash[0]);
+    clog(XDag::LogChannel) << string_format("Share t=%llx res=%s\n%016llx %016llx %016llx%016llx",
+					    task->main_time << 16 | 0xffff, res ? "OK" : "Fail", hash[3], hash[2], hash[1], hash[0]);
+    if(!res)
+    {
+        clog(XDag::LogChannel) << "Failed to send task result";
+        return false;
+    }
+    return true;
+}
+
+void XPool::SubmitShare(cheatcoin_pool_task* task) {
+  _submitQueueMutex.lock();
+  _submitQueue.push(*task);
+  _submitQueueMutex.unlock();
+}
+
+bool XPool::SubmitShareHash(cheatcoin_pool_task* task) {
+    _lastShareTime = time(0);
+    _elapsedTime = _lastShareTime - _startTime;
+    _shareCount++;
+  
+    uint64_t *hash = task->minhash.data;
+    memcpy(_lastHash, hash, sizeof(cheatcoin_hash_t));
+    bool res = SendToPool(&task->lastfield, 1);
+    if (!res || _shareCount % 10 == 0) {
+      clog(XDag::LogChannel)
+	<< string_format("Share t=%llx res=%s\n%016llx %016llx %016llx %016llx",
+			 task->main_time << 16 | 0xffff, res ? "OK" : "Fail", hash[3], hash[2], hash[1], hash[0]);
+      clog(XDag::LogChannel)
+	<< string_format("Elapsed: %llu\tValid:%llu\t %.02f/min",
+			 _elapsedTime, _shareCount, static_cast<float>(_shareCount) / (static_cast<float>(_elapsedTime) / 60.0));
+    }
     if(!res)
     {
         clog(XDag::LogChannel) << "Failed to send task result";

@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "Core/Log.h"
+#include <chrono>
+#include <thread>
 
 #ifdef __linux__
 #include <arpa/inet.h>
@@ -13,7 +15,7 @@
 #define poll WSAPoll
 #endif
 
-#ifdef _WIN32
+#if _WIN32
 #define strtok_r        strtok_s
 #define ioctl           ioctlsocket
 #define fcntl(a,b,c)    0
@@ -38,7 +40,7 @@ XNetwork::~XNetwork()
 
 bool XNetwork::Initialize()
 {
-#ifdef _WIN32
+#if _WIN32
     WSADATA wsaData;
     return WSAStartup(MAKEWORD(2, 2), &wsaData) == 0;
 #endif
@@ -90,43 +92,66 @@ bool XNetwork::ValidateAddress(const char *address, sockaddr_in &peerAddr)
     return true;
 }
 
-bool XNetwork::Connect(const char *address)
+bool XNetwork::Connect(const char* pool_address, uint32_t sourceAddress, int sourcePort)
 {
     int reuseAddr = 1;
     linger lingerOpt = { 1, 0 }; // Linger active, timeout 0
     sockaddr_in peerAddr;
 
-    if(!ValidateAddress(address, peerAddr))
-    {
-        return false;
-    }
-
+    if(!ValidateAddress(pool_address, peerAddr))
+      {
+	return false;
+      }
+    std::cout << "connecting: " << sourcePort << std::endl << std::flush;
     _socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if(_socket == INVALID_SOCKET)
-    {
-        //mess = "cannot create a socket";
+      if(_socket == INVALID_SOCKET) {
+	// mess = "cannot create a socket";
         return false;
-    }
-    if(fcntl(_socket, F_SETFD, FD_CLOEXEC) == -1)
-    {
-        //TODO: log
-        //cheatcoin_err("pool  : can't set FD_CLOEXEC flag on socket %d, %s\n", g_socket, strerror(errno));
-    }
+      }
+#if 0
+      if(fcntl(_socket, F_SETFD, FD_CLOEXEC) == -1)
+	{
+	  //TODO: log
+	  //cheatcoin_err("pool  : can't set FD_CLOEXEC flag on socket %d, %s\n", g_socket, strerror(errno));
+	}
+#endif
+      
 
     // Set the "LINGER" timeout to zero, to close the listen socket
     // immediately at program termination.
-    setsockopt(_socket, SOL_SOCKET, SO_LINGER, (char *)&lingerOpt, sizeof(lingerOpt));
-    setsockopt(_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&reuseAddr, sizeof(int));
+      setsockopt(_socket, SOL_SOCKET, SO_LINGER, (char *)&lingerOpt, sizeof(lingerOpt));
+      setsockopt(_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&reuseAddr, sizeof(int));
+      setsockopt(_socket, SOL_SOCKET, SO_REUSEPORT, (char *)&reuseAddr, sizeof(int));
 
     // Now, connect to a pool
-    int res = connect(_socket, (struct sockaddr*)&peerAddr, sizeof(peerAddr));
-    if(res)
-    {
-        //mess = "cannot connect to the pool";
-        Close();
-        return false;
-    }
-    return true;
+#if 0
+      struct sockaddr_in source;
+      memset(&source, 0, sizeof(struct sockaddr_in));
+      source.sin_family = AF_INET;
+      source.sin_port = htons(sourcePort);
+      //source.sin_port = htons(0);
+      source.sin_addr.s_addr = INADDR_ANY;
+      std::cout << "BIND TO ADDRESS" << std::endl << std::flush;
+      bind(_socket, (struct sockaddr *)&source, sizeof(struct sockaddr_in));
+#endif
+      // XXX abusing sourcePort as device index for now
+      //      std::string deviceName = (boost::format("tun%d") % sourcePort).str();
+      //      std::cout << "BIND TO DEVICE: " << deviceName << std::endl << std::flush;
+      //      if (setsockopt(_socket, SOL_SOCKET, SO_BINDTODEVICE, deviceName.c_str(), strlen(deviceName.c_str()))) {
+	//	std::cerr << perror("setsockopt(): ") << std::endl << std::flush;
+      //	return false;
+      //}
+	   
+      int res = connect(_socket, (struct sockaddr*)&peerAddr, sizeof(peerAddr));
+      if(res)
+	{
+	  perror("connect: ");
+	  std::cerr << "connect failed: " << res << std::endl << std::flush;
+	  //mess = "cannot connect to the pool";
+	  Close();
+	  return false;
+	}
+      return true;
 }
 
 //TODO: think about exception instead of result failure flag
@@ -163,12 +188,12 @@ bool XNetwork::IsReady(NetworkAction action, int timeout, bool& success)
 
 int XNetwork::Write(char* buf, int len)
 {
-    return write(_socket, buf, len);
+  return write(_socket, buf, len);
 }
 
 int XNetwork::Read(char* buf, int len)
 {
-    return read(_socket, buf, len);
+  return read(_socket, buf, len);
 }
 
 void XNetwork::Close()

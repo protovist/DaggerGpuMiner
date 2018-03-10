@@ -8,6 +8,9 @@
 
 #pragma once
 
+#include <ifaddrs.h>
+#include <netinet/in.h>
+
 #include <boost/asio.hpp>
 #include <boost/bind.hpp>
 #include <thread>
@@ -17,6 +20,7 @@
 #include "Worker.h"
 #include "Miner.h"
 #include "XDagCore/XTaskProcessor.h"
+#include "XDagCore/XPool.h"
 
 namespace XDag
 {
@@ -30,11 +34,11 @@ namespace XDag
     public:
         struct SeekerDescriptor
         {
-            std::function<unsigned()> Instances;
-            std::function<Miner*(unsigned, XTaskProcessor*)> Create;
+	  std::function<unsigned()> Instances;
+	  std::function<Miner*(unsigned, XTaskProcessor*, uint32_t sourceAddress, int sourcePort)> Create;
         };
 
-        Farm(XTaskProcessor* taskProcessor) { _taskProcessor = taskProcessor; }
+    Farm(XTaskProcessor* taskProcessor) : _taskProcessor(taskProcessor) {}
         ~Farm()
         {
             Stop();
@@ -51,7 +55,7 @@ namespace XDag
          * @brief Stop all mining activities.
          */
         void Stop();
-
+	;
         void CollectHashRate();
 
         void ProcessHashRate(const boost::system::error_code& ec);
@@ -89,9 +93,12 @@ namespace XDag
         std::string FarmLaunchedFormatted();
 
     private:
+	std::string _accountAddress;
+	std::string _poolUrl;
         std::vector<std::shared_ptr<Miner>> _miners;
+	std::vector<uint32_t> _addresses;
         XTaskProcessor* _taskProcessor;
-
+	
         std::atomic<bool> _isMining = { false };
 
         mutable Mutex _minerWorkLock;

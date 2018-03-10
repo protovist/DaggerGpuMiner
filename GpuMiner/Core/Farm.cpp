@@ -33,14 +33,50 @@ bool Farm::Start()
         ins += s.Instances();
     }
     _miners.reserve(ins);
+    _addresses.reserve(ins);
+
+    struct ifaddrs* addrs;
+    if (getifaddrs(&addrs) == -1) {
+      std::cout << "getifaddrs failed" << std::endl << std::flush;
+      return false;
+    }
+
+#define MAXHOST 1025
+#define NUMERIC 1
+    char host[MAXHOST];
+    struct ifaddrs* ifa;
+    for (ifa = addrs; ifa != NULL; ifa = ifa->ifa_next) {
+      if (ifa->ifa_addr == NULL ||
+	  ifa->ifa_addr->sa_family != AF_INET ||
+	  ifa->ifa_flags & IFF_LOOPBACK ||
+	  !(ifa->ifa_flags & IFF_POINTOPOINT) ||
+	  !(ifa->ifa_flags & IFF_RUNNING)) {
+	continue;
+      }
+      getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host, MAXHOST, NULL, 0, NUMERIC);
+      std::cout << ifa->ifa_name << ":" << host << std::endl << std::flush;
+      _addresses.push_back(((struct sockaddr_in *)ifa->ifa_addr)->sin_addr.s_addr);
+    }
+    freeifaddrs(addrs);
+    
     bool success = true;
+    int sourcePort = 53090;
+    //    int sourcePort = 0;
     for(auto const& s : _seekers)
     {
         ins = s.Instances();
         clog(LogChannel) << "Starting " << ins << " miner instances.";
+	uint32_t sourceAddress = 0;
         for(uint32_t i = 0; i < ins; ++i)
         {
-            _miners.push_back(std::shared_ptr<Miner>(s.Create(i, _taskProcessor)));
+	  //	  if (!_addresses.empty()) {
+	  //	    sourceAddress = _addresses.back();
+	  //	    _addresses.pop_back();
+	  //}
+	  //	  std::cout << "PORT " << sourcePort << std::endl << std::flush;
+	  _miners.push_back(std::shared_ptr<Miner>(s.Create(i, _taskProcessor, sourceAddress, sourcePort)));
+	  sourcePort++;
+	  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
 
             if(!_miners.back()->Initialize())
             {

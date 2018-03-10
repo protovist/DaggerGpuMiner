@@ -19,7 +19,7 @@ enum class NetworkAction
 class XNetwork
 {
 private:
-    SOCKET _socket;
+  SOCKET _socket;
 
     bool ValidateAddress(const char *address, sockaddr_in &_peerAddr);
 public:
@@ -27,7 +27,7 @@ public:
     virtual ~XNetwork();
 
     bool Initialize();
-    bool Connect(const char *address);
+    bool Connect(const char* pool_address, uint32_t source_address, int source_port);
     bool IsReady(NetworkAction action, int timeout, bool &success);
     int Write(char* buf, int len);
     int Read(char* buf, int len);

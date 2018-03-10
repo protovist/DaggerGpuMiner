@@ -192,11 +192,11 @@ namespace XDag
     };
 
 // Kill all logs when when NLOG is defined.
-#ifdef NLOG
+#if NLOG
 #define clog(X) nlog(X)
 #define cslog(X) nslog(X)
 #else
-#ifdef NDEBUG
+#if NDEBUG
 #define clog(X) if (X::debug) {} else dev::LogOutputStream<X, true>()
 #define cslog(X) if (X::debug) {} else dev::LogOutputStream<X, false>()
 #else

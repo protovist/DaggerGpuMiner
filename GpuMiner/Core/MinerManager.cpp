@@ -162,11 +162,7 @@ bool MinerManager::InterpretOption(int& i, int argc, char** argv)
     }
     else if(arg == "-opencl-cpu")
     {
-        _useOpenClCpu = true;
-    }
-    else if(arg == "-nvidia-fix")
-    {
-        _useNvidiaFix = true;
+        _useOpenCpu = true;
     }
     else
     {
@@ -181,7 +177,7 @@ void MinerManager::Execute()
     {
         if((_minerType & MinerType::CL) == MinerType::CL)
         {
-            CLMiner::ListDevices(_useOpenClCpu);
+            CLMiner::ListDevices(_useOpenCpu);
         }
         if((_minerType & MinerType::CPU) == MinerType::CPU)
         {
@@ -229,7 +225,6 @@ void MinerManager::StreamHelp(ostream& _out)
         << "    -t <n> Set number of CPU threads to n (default: the number of threads is equal to number of cores)." << endl
         << "    -d <n> Limit number of used GPU devices to n (default: use everything available on selected platform)." << endl
         << "    -list-devices List the detected devices and exit. Should be combined with -G or -cpu flag." << endl
-        << "    -nvidia-fix Use workaround on high cpu usage with nvidia cards." << endl
         << endl
         << " OpenCL configuration:" << endl
         << "    -cl-local-work Set the OpenCL local work size. Default is " << CLMiner::_defaultLocalWorkSize << endl
@@ -252,7 +247,7 @@ void MinerManager::DoBenchmark(MinerType type, unsigned warmupDuration, unsigned
     taskProcessor.SwitchTask();
 
     Farm farm(&taskProcessor);
-    farm.AddSeeker(Farm::SeekerDescriptor { &CLMiner::Instances, [](unsigned index, XTaskProcessor* taskProcessor) { return new CLMiner(index, taskProcessor); } });
+    farm.AddSeeker(Farm::SeekerDescriptor { &CLMiner::Instances, [](unsigned index, XTaskProcessor* taskProcessor, uint32_t sourceAddress, int sourcePort) { return new CLMiner(index, taskProcessor, 0, 0); } });
 
     string platformInfo = "CL";
     cout << "Benchmarking on platform: " << platformInfo << endl;
@@ -272,7 +267,7 @@ void MinerManager::DoBenchmark(MinerType type, unsigned warmupDuration, unsigned
         {
             cout << "Trial " << i << "... " << flush;
         }
-        this_thread::sleep_for(chrono::seconds(i ? trialDuration : warmupDuration));
+	std::this_thread::sleep_for(std::chrono::seconds(i ? trialDuration : warmupDuration));
 
         auto mp = farm.MiningProgress();
         if(!i)
@@ -301,31 +296,17 @@ void MinerManager::DoBenchmark(MinerType type, unsigned warmupDuration, unsigned
 
 void MinerManager::DoMining(MinerType type, string& remote, unsigned recheckPeriod)
 {
-    XTaskProcessor taskProcessor;
 
-    XPool pool(_accountAddress, remote, &taskProcessor);
-    if(!pool.Initialize())
-    {
-        cerr << "Pool initialization error" << endl;
-        exit(-1);
-    }
-    if(!pool.Connect())
-    {
-        cerr << "Cannot connect to pool" << endl;
-        exit(-1);
-    }
-    //wait a bit
-    this_thread::sleep_for(chrono::milliseconds(200));
-
-    Farm farm(&taskProcessor);
-
+  XTaskProcessor taskProcessor(_accountAddress, remote);
+  Farm farm(&taskProcessor);
+  
     if((type & MinerType::CL) == MinerType::CL)
     {
-        farm.AddSeeker(Farm::SeekerDescriptor { &CLMiner::Instances, [](unsigned index, XTaskProcessor* taskProcessor) { return new CLMiner(index, taskProcessor); } });
+      farm.AddSeeker(Farm::SeekerDescriptor { &CLMiner::Instances, [](unsigned index, XTaskProcessor* taskProcessor, uint32_t sourceAddress, int sourcePort) { return new CLMiner(index, taskProcessor, sourceAddress, sourcePort); } });
     }
     if((type & MinerType::CPU) == MinerType::CPU)
     {
-        farm.AddSeeker(Farm::SeekerDescriptor { &XCpuMiner::Instances, [](unsigned index, XTaskProcessor* taskProcessor) { return new XCpuMiner(index, taskProcessor); } });
+      //        farm.AddSeeker(Farm::SeekerDescriptor { &XCpuMiner::Instances, [](unsigned index, XTaskProcessor* taskProcessor) { return new XCpuMiner(index, taskProcessor); } });
     }
 
     if(!farm.Start())
@@ -338,42 +319,13 @@ void MinerManager::DoMining(MinerType type, string& remote, unsigned recheckPeri
     bool isConnected = true;
     while(_running)
     {
-        if(!isConnected)
-        {
-            isConnected = pool.Connect();
-            if(isConnected)
-            {
-                if(!farm.Start())
-                {
-                    cerr << "Failed to restart mining";
-                    exit(-1);
-                }
-            }
-            else
-            {
-                cerr << "Cannot connect to pool. Reconnection..." << endl;
-                this_thread::sleep_for(chrono::milliseconds(5000));
-                continue;
-            }
-        }
-
-        if(!pool.Interract())
-        {
-            pool.Disconnect();
-            farm.Stop();
-            isConnected = false;
-            cerr << "Failed to get data from pool. Reconnection..." << endl;
-            this_thread::sleep_for(chrono::milliseconds(5000));
-            continue;
-        }
-
         if(iteration > 0 && (iteration & 1) == 0)
         {
             auto mp = farm.MiningProgress();
             minelog << mp;
         }
 
-        this_thread::sleep_for(chrono::milliseconds(_poolRecheckPeriod));
+	std::this_thread::sleep_for(std::chrono::milliseconds(_poolRecheckPeriod));
         ++iteration;
     }
     farm.Stop();
@@ -391,13 +343,12 @@ void MinerManager::ConfigureGpu()
         _localWorkSize,
         _globalWorkSizeMultiplier,
         _openclPlatform,
-        _useOpenClCpu))
+        _useOpenCpu))
     {
         exit(1);
     }
 
     CLMiner::SetNumInstances(_openclMiningDevices);
-    CLMiner::SetUseNvidiaFix(_useNvidiaFix);
 }
 
 void MinerManager::ConfigureCpu()

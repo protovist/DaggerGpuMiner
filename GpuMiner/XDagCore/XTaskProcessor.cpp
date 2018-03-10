@@ -1,11 +1,6 @@
 #include "XTaskProcessor.h"
 #include "Core/Log.h"
 
-XTaskProcessor::XTaskProcessor()
-{
-    _taskCount = 0;
-}
-
 XTaskProcessor::~XTaskProcessor()
 {
 }

@@ -1,5 +1,5 @@
 #pragma once
-#ifdef _WIN32
+#if _WIN32
 #include "win\sys\time.h"
 #else
 #include <sys/time.h>

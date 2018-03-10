@@ -7,6 +7,7 @@
 
 #include "Core/Worker.h"
 #include "Core/Miner.h"
+#include "XDagCore/XPool.h"
 
 #define CL_USE_DEPRECATED_OPENCL_1_2_APIS true
 #define CL_HPP_ENABLE_EXCEPTIONS true
@@ -43,7 +44,7 @@ namespace XDag
         /// Default value of the global work size as a multiplier of the local work size
         static const uint32_t _defaultGlobalWorkSizeMultiplier = 8192;
 
-        CLMiner(uint32_t index, XTaskProcessor* taskProcessor);
+        CLMiner(uint32_t index, XTaskProcessor* taskProcessor, uint32_t sourceAddress, int sourcePort);
         virtual ~CLMiner();
 
         static uint32_t Instances() { return _numInstances > 0 ? _numInstances : 1; }
@@ -63,7 +64,6 @@ namespace XDag
                 _devices[i] = devices[i];
             }
         }
-        static void SetUseNvidiaFix(bool useNvidiaFix) { _useNvidiaFix = useNvidiaFix; }
 
         bool Initialize() override;
         HwMonitor Hwmon() override;
@@ -73,8 +73,8 @@ namespace XDag
         bool LoadKernelCode();
         void SetMinShare(XTaskWrapper* taskWrapper, uint64_t* searchBuffer, cheatcoin_field& last);
         void WriteKernelArgs(XTaskWrapper* taskWrapper, uint64_t* zeroBuffer);
-        void ReadData(uint64_t* results);
 
+	std::unique_ptr<XPool> _pool;
         cl::Context _context;
         cl::CommandQueue _queue;
         cl::Kernel _searchKernel;
@@ -82,18 +82,16 @@ namespace XDag
         cl::Buffer _precalcStateBuffer;
         cl::Buffer _dataBuffer;
         cl::Buffer _searchBuffer;
-        uint32_t _globalWorkSize;
-        uint32_t _workgroupSize;
+        uint32_t _globalWorkSize = 0;
+        uint32_t _workgroupSize = 0;
         std::string _kernelCode;
-        uint32_t _platformId;
-        uint32_t _kernelExecutionMcs;
+	bool _isConnected = false;
 
-        static uint32_t _selectedPlatformId;
+        static uint32_t _platformId;
         static uint32_t _numInstances;
         static std::string _clKernelName;
         static int _devices[MAX_CL_DEVICES];
         static bool _useOpenClCpu;
-        static bool _useNvidiaFix;
 
         /// The local work size for the search
         static uint32_t _sWorkgroupSize;

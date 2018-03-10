@@ -70,10 +70,9 @@ private:
     unsigned _openclSelectedKernel = 0;  ///< A numeric value for the selected OpenCL kernel
     unsigned _openclDeviceCount = 0;
     unsigned _openclDevices[MAX_CL_DEVICES];
-    bool _useOpenClCpu = false;
+    bool _useOpenCpu = false;
     unsigned _globalWorkSizeMultiplier = CLMiner::_defaultGlobalWorkSizeMultiplier;
     unsigned _localWorkSize = CLMiner::_defaultLocalWorkSize;
-    bool _useNvidiaFix = false;
 
     /// Benchmarking params
     unsigned _benchmarkWarmup = 15;

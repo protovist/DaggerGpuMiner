@@ -1,5 +1,7 @@
 ﻿#pragma once
 
+#include <boost/lockfree/queue.hpp>
+
 #include "XNetwork.h"
 #include "XBlock.h"
 #include "XTaskProcessor.h"
@@ -38,7 +40,10 @@ struct cheatcoin_block;
 
 class XPool
 {
-private:
+ private:
+  uint32_t _sourceAddress;
+  int _sourcePort;
+    std::unique_ptr<std::thread> _submitThread;
     cheatcoin_hash_t _addressHash;
     char _poolAddress[256];
     XNetwork _network;
@@ -48,7 +53,10 @@ private:
     dfslib_crypt *_crypt;
     cheatcoin_hash_t _lastHash;
     time_t _taskTime;
+    time_t _startTime;
+    time_t _elapsedTime;
     time_t _lastShareTime;
+    uint64_t _shareCount;
     //TODO: the purpose of these properties is unclear for me now, just copy-paste...
     int _ndata, _maxndata;
     cheatcoin_block _firstBlock;
@@ -58,14 +66,21 @@ private:
 
     bool CheckNewTasks();
     bool SendTaskResult();
-    void OnNewTask(cheatcoin_field* data);    
+    void OnNewTask(cheatcoin_field* data);
     bool HasNewShare();
-public:
-    XPool(std::string& accountAddress, std::string& poolAddress, XTaskProcessor *taskProcessor);
+
+    boost::lockfree::queue<cheatcoin_pool_task> _submitQueue { 1024 };
+    std::mutex _submitQueueMutex;
+
+ public:
+    //    XPool(std::string& accountAddress, std::string& poolAddress, XTaskProcessor *taskProcessor);
+    XPool(XTaskProcessor *taskProcessor, uint32_t sourceAddress, int sourcePort);
     virtual ~XPool();
 
     bool Initialize();
     bool Connect();
     void Disconnect();
     bool Interract();
+    void SubmitShare(cheatcoin_pool_task* task);
+    bool SubmitShareHash(cheatcoin_pool_task* task);
 };

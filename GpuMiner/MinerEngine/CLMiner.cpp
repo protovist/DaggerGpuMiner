@@ -4,10 +4,16 @@
 /// @copyright GNU General Public License
 
 #include "CLMiner.h"
-#include "Utils/PathUtils.h"
-#include <fstream>
-#include "Hash/sha256_mod.h"
+
 #include <boost/algorithm/string.hpp>
+#include <chrono>
+#include <fstream>
+#include <thread>
+
+#include "Hash/sha256_mod.h"
+#include "Utils/PathUtils.h"
+#include "Utils/Random.h"
+#include "Utils/StringFormat.h"
 #include "Utils/Utils.h"
 
 using namespace XDag;
@@ -22,18 +28,12 @@ using namespace XDag;
 #define KERNEL_ARG_OUTPUT 6
 //TODO: weird, but it decreases performance...
 //#define USE_VECTORS
-#define KERNEL_ITERATIONS 16
-#define NVIDIA_SPIN_DAMP 0.9
+#define KERNEL_ITERATIONS 8
 
 unsigned CLMiner::_sWorkgroupSize = CLMiner::_defaultLocalWorkSize;
 unsigned CLMiner::_sInitialGlobalWorkSize = CLMiner::_defaultGlobalWorkSizeMultiplier * CLMiner::_defaultLocalWorkSize;
-#ifdef __linux__
 std::string CLMiner::_clKernelName = "CL/CLMiner_kernel.cl";
-#else
-std::string CLMiner::_clKernelName = "CLMiner_kernel.cl";
-#endif
 bool CLMiner::_useOpenClCpu = false;
-bool CLMiner::_useNvidiaFix = false;
 
 struct CLChannel : public LogChannel
 {
@@ -50,6 +50,7 @@ struct CLChannel : public LogChannel
  */
 static const char *strClError(cl_int err)
 {
+
     switch(err)
     {
     case CL_SUCCESS:
@@ -263,13 +264,24 @@ std::vector<cl::Device> GetDevices(std::vector<cl::Platform> const& platforms, u
 }
 
 
-unsigned CLMiner::_selectedPlatformId = 0;
+uint32_t CLMiner::_platformId = 0;
 uint32_t CLMiner::_numInstances = 0;
 int CLMiner::_devices[MAX_CL_DEVICES] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 
-CLMiner::CLMiner(uint32_t index, XTaskProcessor* taskProcessor)
-    :Miner("cl-", index, taskProcessor)
-{
+
+CLMiner::CLMiner(uint32_t index, XTaskProcessor* taskProcessor, uint32_t sourceAddress, int sourcePort)
+  :Miner("cl-", index, taskProcessor), _pool(new XPool(taskProcessor, sourceAddress, sourcePort)) {
+  if(!_pool->Initialize())
+    {
+      std::cerr << "Pool initialization error" << std::endl;
+      exit(-1);
+    }
+  _isConnected = _pool->Connect();
+  if(!_isConnected)
+    {
+      std::cerr << "Cannot connect to pool" << std::endl;
+      exit(-1);
+    }
 }
 
 CLMiner::~CLMiner()
@@ -286,13 +298,15 @@ bool CLMiner::ConfigureGPU(
     //TODO: do I need automatically detemine path to executable folder?
     std::string path = PathUtils::GetModuleFolder();
     path += _clKernelName;
+    std::cout << path << std::endl;
+    
     if(!PathUtils::FileExists(path))
     {
         XCL_LOG("OpenCL kernel file is not found: " << path);
         return false;
     }
 
-    _selectedPlatformId = platformId;
+    _platformId = platformId;
     _useOpenClCpu = useOpenClCpu;
 
     localWorkSize = ((localWorkSize + 7) / 8) * 8;
@@ -305,12 +319,12 @@ bool CLMiner::ConfigureGPU(
         XCL_LOG("No OpenCL platforms found.");
         return false;
     }
-    if(_selectedPlatformId >= platforms.size())
+    if(_platformId >= platforms.size())
     {
         return false;
     }
 
-    std::vector<cl::Device> devices = GetDevices(platforms, _selectedPlatformId, _useOpenClCpu);
+    std::vector<cl::Device> devices = GetDevices(platforms, _platformId, _useOpenClCpu);
     if(devices.size() == 0)
     {
         XCL_LOG("No OpenCL devices found.");
@@ -348,12 +362,12 @@ bool CLMiner::Initialize()
         }
 
         // use selected platform
-        unsigned platformIdx = std::min<unsigned>(_selectedPlatformId, (uint32_t)platforms.size() - 1);
+        unsigned platformIdx = std::min<unsigned>(_platformId, (uint32_t)platforms.size() - 1);
 
         std::string platformName = platforms[platformIdx].getInfo<CL_PLATFORM_NAME>();
         XCL_LOG("Platform: " << platformName);
 
-        _platformId = OPENCL_PLATFORM_UNKNOWN;
+        int platformId = OPENCL_PLATFORM_UNKNOWN;
         {
             // this mutex prevents race conditions when calling the adl wrapper since it is apparently not thread safe
             static std::mutex mtx;
@@ -361,17 +375,17 @@ bool CLMiner::Initialize()
 
             if(platformName == "NVIDIA CUDA")
             {
-                _platformId = OPENCL_PLATFORM_NVIDIA;
+                platformId = OPENCL_PLATFORM_NVIDIA;
                 //nvmlh = wrap_nvml_create();
             }
             else if(platformName == "AMD Accelerated Parallel Processing")
             {
-                _platformId = OPENCL_PLATFORM_AMD;
+                platformId = OPENCL_PLATFORM_AMD;
                 //adlh = wrap_adl_create();
             }
             else if(platformName == "Clover")
             {
-                _platformId = OPENCL_PLATFORM_CLOVER;
+                platformId = OPENCL_PLATFORM_CLOVER;
             }
         }
 
@@ -393,7 +407,7 @@ bool CLMiner::Initialize()
 
         char options[256];
         int computeCapability = 0;
-        if(_platformId == OPENCL_PLATFORM_NVIDIA)
+        if(platformId == OPENCL_PLATFORM_NVIDIA)
         {
             cl_uint computeCapabilityMajor;
             cl_uint computeCapabilityMinor;
@@ -515,6 +529,26 @@ void CLMiner::WorkLoop()
     {
         while(true)
         {
+	  if(!_isConnected)
+	    {
+	      _isConnected = _pool->Connect();
+	      if (!_isConnected) 
+		{
+		  std::cerr << "Cannot connect to pool. Reconnection..." << std::endl;
+		  std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+		  continue;
+		}
+	    }
+
+	  if(!_pool->Interract())
+	    {
+	      _pool->Disconnect();
+	      _isConnected = false;
+	      std::cerr << "Failed to get data from pool. Reconnection..." << std::endl;
+	      std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+	      continue;
+	    }
+
             // Check if we should stop.
             if(ShouldStop())
             {
@@ -543,16 +577,17 @@ void CLMiner::WorkLoop()
                 prevTaskIndex = taskWrapper->GetIndex();
                 loopCounter = 0;
                 memcpy(last.data, taskWrapper->GetTask()->nonce.data, sizeof(cheatcoin_hash_t));
-                nonce = last.amount + _index * 1000000000000;//TODO: think of nonce increment
+		//                nonce = last.amount + _index * 1000000000000;//TODO: think of nonce increment
 
                 WriteKernelArgs(taskWrapper, zeroBuffer);
             }
-
+            
             bool hasSolution = false;
+            _queue.enqueueReadBuffer(_searchBuffer, CL_FALSE, 0, (OUTPUT_SIZE + 1) * sizeof(uint64_t), results);
             if(loopCounter > 0)
             {
                 // Read results.
-                ReadData(results);
+                _queue.enqueueReadBuffer(_searchBuffer, CL_TRUE, 0, (OUTPUT_SIZE + 1) * sizeof(uint64_t), results);
 
                 //miner return an array with 17 64-bit values. If nonce for hash lower than target hash is found - it is written to array. 
                 //the first value in array contains count of found solutions
@@ -565,7 +600,9 @@ void CLMiner::WorkLoop()
             }
 
             // Run the kernel.
-            _searchKernel.setArg(KERNEL_ARG_NONCE, nonce);
+	    CRandom::FillRandomArray((uint8_t*)&nonce, sizeof(uint64_t));
+	    //	    nonce = std::rand();
+	    _searchKernel.setArg(KERNEL_ARG_NONCE, nonce);
             _queue.enqueueNDRangeKernel(_searchKernel, cl::NullRange, _globalWorkSize, _workgroupSize);
 
             // Report results while the kernel is running.
@@ -574,7 +611,7 @@ void CLMiner::WorkLoop()
             {
                 //we need to recalculate hashes for all founded nonces and choose the minimal one
                 SetMinShare(taskWrapper, results, last);
-#ifdef _DEBUG
+#if _DEBUG
                 std::cout << HashToHexString(taskWrapper->GetTask()->minhash.data) << std::endl;
 #endif
                 //new minimal hash is written as target hash for GPU
@@ -610,7 +647,7 @@ uint32_t CLMiner::GetNumDevices()
         return 0;
     }
 
-    std::vector<cl::Device> devices = GetDevices(platforms, _selectedPlatformId, _useOpenClCpu);
+    std::vector<cl::Device> devices = GetDevices(platforms, _platformId, _useOpenClCpu);
     if(devices.empty())
     {
         cwarn << "No OpenCL devices found.";
@@ -675,6 +712,7 @@ bool CLMiner::LoadKernelCode()
 {
     std::string path = PathUtils::GetModuleFolder();
     path += _clKernelName;
+    std::cout << "kernel path: " << path << std::endl;
     if(!PathUtils::FileExists(path))
     {
         return false;
@@ -710,7 +748,14 @@ void CLMiner::SetMinShare(XTaskWrapper* taskWrapper, uint64_t* searchBuffer, che
 {
     cheatcoin_hash_t minHash;
     cheatcoin_hash_t currentHash;
+    cheatcoin_pool_task* task = taskWrapper->GetTask();
     uint64_t minNonce = 0;
+
+    typedef struct {
+      uint64_t nonce;
+      cheatcoin_hash_t hash;
+    } result;
+    std::vector<result> results;
 
     uint32_t size = searchBuffer[0] < OUTPUT_SIZE ? (uint32_t)searchBuffer[0] : OUTPUT_SIZE;
     for(uint32_t i = 1; i <= size; ++i)
@@ -720,21 +765,30 @@ void CLMiner::SetMinShare(XTaskWrapper* taskWrapper, uint64_t* searchBuffer, che
         {
             continue;
         }
-        shamod::shasha(taskWrapper->GetTask()->ctx.state, taskWrapper->GetTask()->ctx.data, nonce, (uint8_t*)currentHash);
-        if(!minNonce || XHash::CompareHashes(currentHash, minHash) < 0)
-        {
-            memcpy(minHash, currentHash, sizeof(cheatcoin_hash_t));
-            minNonce = nonce;
-        }
+        shamod::shasha(task->ctx.state, task->ctx.data, nonce, (uint8_t*)currentHash);
+        result r;
+        r.nonce = nonce;
+        memcpy(r.hash, currentHash, sizeof(cheatcoin_hash_t));
+        results.push_back(r);
     }
+    std::sort(std::begin(results), std::end(results), [](result a, result b) {
+        return XHash::CompareHashes(a.hash, b.hash) < 0;
+      });
+    last.amount = results.back().nonce;
+    memcpy(task->minhash.data, results.back().hash, sizeof(cheatcoin_hash_t));
+    memcpy(task->lastfield.data, last.data, sizeof(cheatcoin_hash_t));
+    _pool->SubmitShareHash(task);
 
-#ifdef _DEBUG
+#if _DEBUG
     assert(minNonce > 0);
 #endif
     if(minNonce > 0)
     {
-        last.amount = minNonce;
-        taskWrapper->SetShare(last.data, minHash);
+      //              last.amount = minNonce;
+      //        taskWrapper->SetShare(last.data, minHash);
+      //	      	memcpy(task->minhash.data, minHash, sizeof(cheatcoin_hash_t));
+      //		memcpy(task->lastfield.data, last.data, sizeof(cheatcoin_hash_t));
+      //		_pool->SubmitShare(task);
     }
 }
 
@@ -754,29 +808,4 @@ void CLMiner::WriteKernelArgs(XTaskWrapper* taskWrapper, uint64_t* zeroBuffer)
     _searchKernel.setArg(KERNEL_ARG_TARGET_H, ((uint32_t*)taskWrapper->GetTask()->minhash.data)[7]);
     _searchKernel.setArg(KERNEL_ARG_TARGET_G, ((uint32_t*)taskWrapper->GetTask()->minhash.data)[6]);
     _searchKernel.setArg(KERNEL_ARG_OUTPUT, _searchBuffer); // Supply output buffer to kernel
-}
-
-void CLMiner::ReadData(uint64_t* results)
-{
-    if(_platformId != OPENCL_PLATFORM_NVIDIA || !_useNvidiaFix)
-    {
-        _queue.enqueueReadBuffer(_searchBuffer, CL_TRUE, 0, (OUTPUT_SIZE + 1) * sizeof(uint64_t), results);
-    }
-    else
-    {
-        _queue.flush();
-
-        //during executing the opencl program nvidia opencl library enters loop which checks if the execution of opencl program has ended
-        //so, current thread just spins in this loop, eating CPU for nothing.
-        //workaround for the problem: add sleep for some calculated time after the kernel was queued and flushed
-        if(_kernelExecutionMcs > 0)
-        {
-            std::this_thread::sleep_for(std::chrono::microseconds(_kernelExecutionMcs));
-        }
-        auto startTime = std::chrono::high_resolution_clock::now();
-        _queue.enqueueReadBuffer(_searchBuffer, CL_TRUE, 0, (OUTPUT_SIZE + 1) * sizeof(uint64_t), results);
-        auto endTime = std::chrono::high_resolution_clock::now();
-        std::chrono::microseconds duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
-        _kernelExecutionMcs = (uint32_t)((_kernelExecutionMcs + duration.count()) * NVIDIA_SPIN_DAMP);
-    }
 }
